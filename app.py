@@ -1,117 +1,122 @@
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
 import io
 
-# --- 1. The ID Card Generation Function ---
-def generate_card(name, id_number, photo_upload):
-    # CR80 Dimensions at 300 DPI
-    DPI = 300
-    WIDTH = int(3.370 * DPI)  # 1011 px
-    HEIGHT = int(2.125 * DPI) # 637 px
+# --- THE SMART FACE CROP FUNCTION ---
+def smart_face_crop(pil_image, target_w=300, target_h=400):
+    """
+    Detects a face, adds padding, crops, and resizes to target dimensions.
+    Falls back to center-crop if no face is detected.
+    """
+    # 1. Fix Orientation from phone cameras
+    pil_image = ImageOps.exif_transpose(pil_image)
+
+    # 2. Convert PIL image (RGB) to OpenCV format (BGR numpy array)
+    # Convert to numpy array
+    img_np = np.array(pil_image.convert('RGB'))
+    # Switch RGB to BGR for OpenCV
+    cv_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
     
-    # Colors
-    WHITE = (255, 255, 255)
-    BLACK = (0, 0, 0)
-    BLUE = (0, 50, 150)
+    # Convert to grayscale for detection
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+
+    # 3. Load OpenCV Face Detector (Haar Cascade)
+    # cv2.data.haarcascades points to where OpenCV installed the XML files
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+
+    # Detect faces
+    # scaleFactor=1.1, minNeighbors=5 are standard tuning parameters
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
+
+    status_text = ""
     
-    # Create Canvas
-    card = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
-    draw = ImageDraw.Draw(card)
-    
-    # Draw Header
-    header_height = 120
-    draw.rectangle([(0, 0), (WIDTH, header_height)], fill=BLUE)
-    
-    # Load Fonts
-    # We use load_default to ensure it works on any server (Streamlit Cloud, Linux, etc.)
-    # For custom fonts, you would put the .ttf file in the folder and load it.
-    try:
-        title_font = ImageFont.truetype("arial.ttf", 60)
-        subtitle_font = ImageFont.truetype("arial.ttf", 35)
-        header_font = ImageFont.truetype("arial.ttf", 60)
-    except IOError:
-        # Fallback for servers that don't have Arial
-        title_font = ImageFont.load_default()
-        subtitle_font = ImageFont.load_default()
-        header_font = ImageFont.load_default()
+    if len(faces) > 0:
+        status_text = f"Found {len(faces)} face(s). Cropping largest."
+        # Find the largest face if multiple exist -> max area (w * h)
+        # face format is (x, y, width, height)
+        largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
+        x, y, w, h = largest_face
 
-    # Draw Header Text
-    draw.text((30, 30), "EMPLOYEE ID", font=header_font, fill=WHITE)
+        # 4. Define Padding (Crucial for ID photos)
+        # We don't want a tight crop onto the chin/forehead.
+        # Let's add ~25% padding to height and ~15% to width.
+        pad_h = int(h * 0.25)
+        pad_w = int(w * 0.15)
 
-    # --- Process Photo ---
-    photo_w, photo_h = 300, 400
-    photo_x, photo_y = 50, 150
-    
-    if photo_upload is not None:
-        try:
-            # Open the uploaded image
-            img = Image.open(photo_upload)
-            
-            # Auto-orient (fixes rotation issues from phone cameras)
-            img = ImageOps.exif_transpose(img)
-            
-            # Resize/Crop
-            img = ImageOps.fit(img, (photo_w, photo_h), centering=(0.5, 0.5))
-            
-            # Border
-            img = ImageOps.expand(img, border=3, fill=BLACK)
-            
-            # Paste
-            card.paste(img, (photo_x, photo_y))
-        except Exception as e:
-            st.error(f"Error processing image: {e}")
-    else:
-        # Placeholder box if no image uploaded
-        draw.rectangle([(photo_x, photo_y), (photo_x+photo_w, photo_y+photo_h)], outline=BLACK)
-        draw.text((photo_x + 80, photo_y + 180), "No Photo", fill=BLACK)
+        # Calculate new coordinates ensuring they don't go off the image edge
+        img_h_cv, img_w_cv, _ = cv_img.shape
+        y1 = max(0, y - pad_h)
+        y2 = min(img_h_cv, y + h + pad_h)
+        x1 = max(0, x - pad_w)
+        x2 = min(img_w_cv, x + w + pad_w)
 
-    # --- Draw Text ---
-    text_x = 400
-    text_y = 200
-
-    draw.text((text_x, text_y), "Name:", font=subtitle_font, fill=BLUE)
-    draw.text((text_x, text_y + 45), name, font=title_font, fill=BLACK)
-
-    draw.text((text_x, text_y + 140), "ID Number:", font=subtitle_font, fill=BLUE)
-    draw.text((text_x, text_y + 185), id_number, font=title_font, fill=BLACK)
-
-    return card
-
-# --- 2. Streamlit Interface ---
-st.title("🪪 ID Card Generator")
-st.write("Upload a photo and enter details to generate a printable CR80 ID card.")
-
-# Input Layout
-col1, col2 = st.columns(2)
-
-with col1:
-    input_name = st.text_input("Full Name", "John Doe")
-    input_id = st.text_input("ID Number", "12345678")
-
-with col2:
-    uploaded_file = st.file_uploader("Upload Photo", type=["jpg", "png", "jpeg"])
-
-if st.button("Generate ID Card"):
-    if input_name and input_id:
-        # Generate the card
-        final_card = generate_card(input_name, input_id, uploaded_file)
+        # Crop using numpy slicing [rows, columns]
+        cropped_cv = cv_img[y1:y2, x1:x2]
         
-        # Display the result
-        st.success("Card Generated Successfully!")
-        st.image(final_card, caption="Preview", use_container_width=True)
-        
-        # Prepare for Download
-        # We save the image into a memory buffer (BytesIO) instead of a file on disk
-        buf = io.BytesIO()
-        final_card.save(buf, format="PNG")
-        byte_im = buf.getvalue()
-
-        # Download Button
-        st.download_button(
-            label="Download ID Card (PNG)",
-            data=byte_im,
-            file_name=f"{input_name}_id.png",
-            mime="image/png"
-        )
+        # Convert back to PIL RGB
+        img_to_resize = Image.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
     else:
-        st.warning("Please enter both Name and ID Number.")
+        status_text = "No face clearly detected. Using center crop."
+        # Fallback to the original whole image
+        img_to_resize = pil_image
+
+    # 5. Final Resize using Lanczos (high quality resampling)
+    # ImageOps.fit ensures the cropped area fills the target dimensions perfectly
+    final_img = ImageOps.fit(
+        img_to_resize, 
+        (target_w, target_h), 
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5)
+    )
+
+    return final_img, status_text
+
+
+# --- STREAMLIT INTERFACE ---
+st.set_page_config(page_title="Smart Photo Cropper", layout="wide")
+
+st.title("📷 Smart Face Cropper for ID Cards")
+st.write("Upload a photo. The app will attempt to detect the face and crop it perfectly for a 300x400 ID slot.")
+
+uploaded_file = st.file_uploader("Choose an image...", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file is not None:
+    col1, col2 = st.columns(2)
+    
+    # Load original image
+    original_image = Image.open(uploaded_file)
+    
+    with col1:
+        st.subheader("Original")
+        # Use expander so huge photos don't take up too much space
+        with st.expander("View Original Image", expanded=True):
+            st.image(original_image, use_container_width=True)
+
+    with col2:
+        st.subheader("Smart Crop Preview (300x400)")
+        with st.spinner("Detecting face and cropping..."):
+            # Run the smart crop function
+            processed_img, status = smart_face_crop(original_image, target_w=300, target_h=400)
+            
+            # Display status tag
+            if "Found" in status:
+                st.success(status)
+            else:
+                st.warning(status)
+                
+            # Show the result
+            st.image(processed_img)
+            
+            # Download button for the processed image
+            buf = io.BytesIO()
+            processed_img.save(buf, format="PNG")
+            byte_im = buf.getvalue()
+            st.download_button(
+                label="Download Processed Photo",
+                data=byte_im,
+                file_name="smart_cropped_photo.png",
+                mime="image/png"
+            )
