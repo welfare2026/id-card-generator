@@ -1,70 +1,60 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import io
 
-# --- THE SMART FACE CROP FUNCTION ---
+# --- 1. SMART FACE CROP FUNCTION ---
 def smart_face_crop(pil_image, target_w=300, target_h=400):
     """
     Detects a face, adds padding, crops, and resizes to target dimensions.
     Falls back to center-crop if no face is detected.
     """
-    # 1. Fix Orientation from phone cameras
+    # Fix Orientation from phone cameras
     pil_image = ImageOps.exif_transpose(pil_image)
 
-    # 2. Convert PIL image (RGB) to OpenCV format (BGR numpy array)
-    # Convert to numpy array
+    # Convert to OpenCV format (BGR numpy array)
     img_np = np.array(pil_image.convert('RGB'))
-    # Switch RGB to BGR for OpenCV
     cv_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
     
     # Convert to grayscale for detection
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
 
-    # 3. Load OpenCV Face Detector (Haar Cascade)
-    # cv2.data.haarcascades points to where OpenCV installed the XML files
+    # Load Face Detector
     cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
     face_cascade = cv2.CascadeClassifier(cascade_path)
 
     # Detect faces
-    # scaleFactor=1.1, minNeighbors=5 are standard tuning parameters
     faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
 
     status_text = ""
     
     if len(faces) > 0:
-        status_text = f"Found {len(faces)} face(s). Cropping largest."
-        # Find the largest face if multiple exist -> max area (w * h)
-        # face format is (x, y, width, height)
+        status_text = f"Face detected. Cropping to fit."
+        # Find largest face
         largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
         x, y, w, h = largest_face
 
-        # 4. Define Padding (Crucial for ID photos)
-        # We don't want a tight crop onto the chin/forehead.
-        # Let's add ~25% padding to height and ~15% to width.
+        # Add Padding (25% vertical, 15% horizontal)
         pad_h = int(h * 0.25)
         pad_w = int(w * 0.15)
 
-        # Calculate new coordinates ensuring they don't go off the image edge
         img_h_cv, img_w_cv, _ = cv_img.shape
         y1 = max(0, y - pad_h)
         y2 = min(img_h_cv, y + h + pad_h)
         x1 = max(0, x - pad_w)
         x2 = min(img_w_cv, x + w + pad_w)
 
-        # Crop using numpy slicing [rows, columns]
+        # Crop
         cropped_cv = cv_img[y1:y2, x1:x2]
         
-        # Convert back to PIL RGB
+        # Convert back to PIL
         img_to_resize = Image.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
     else:
-        status_text = "No face clearly detected. Using center crop."
-        # Fallback to the original whole image
+        status_text = "No face detected. Using center crop."
         img_to_resize = pil_image
 
-    # 5. Final Resize using Lanczos (high quality resampling)
-    # ImageOps.fit ensures the cropped area fills the target dimensions perfectly
+    # Final Smart Resize
     final_img = ImageOps.fit(
         img_to_resize, 
         (target_w, target_h), 
@@ -74,49 +64,76 @@ def smart_face_crop(pil_image, target_w=300, target_h=400):
 
     return final_img, status_text
 
-
-# --- STREAMLIT INTERFACE ---
-st.set_page_config(page_title="Smart Photo Cropper", layout="wide")
-
-st.title("📷 Smart Face Cropper for ID Cards")
-st.write("Upload a photo. The app will attempt to detect the face and crop it perfectly for a 300x400 ID slot.")
-
-uploaded_file = st.file_uploader("Choose an image...", type=['jpg', 'jpeg', 'png'])
-
-if uploaded_file is not None:
-    col1, col2 = st.columns(2)
+# --- 2. ID CARD GENERATOR FUNCTION ---
+def generate_card(name, id_number, role, photo_upload):
+    # CR80 Dimensions @ 300 DPI
+    DPI = 300
+    WIDTH = int(3.370 * DPI)  # 1011 px
+    HEIGHT = int(2.125 * DPI) # 637 px
     
-    # Load original image
-    original_image = Image.open(uploaded_file)
+    # Colors
+    WHITE = (255, 255, 255)
+    BLACK = (0, 0, 0)
+    BLUE = (0, 50, 150)
     
-    with col1:
-        st.subheader("Original")
-        # Use expander so huge photos don't take up too much space
-        with st.expander("View Original Image", expanded=True):
-            st.image(original_image, use_container_width=True)
+    # Create Canvas
+    card = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
+    draw = ImageDraw.Draw(card)
+    
+    # Draw Header
+    header_height = 120
+    draw.rectangle([(0, 0), (WIDTH, header_height)], fill=BLUE)
+    
+    # Fonts
+    try:
+        title_font = ImageFont.truetype("arial.ttf", 60)
+        subtitle_font = ImageFont.truetype("arial.ttf", 35)
+        header_font = ImageFont.truetype("arial.ttf", 65)
+        role_font = ImageFont.truetype("arial.ttf", 45)
+    except IOError:
+        title_font = ImageFont.load_default()
+        subtitle_font = ImageFont.load_default()
+        header_font = ImageFont.load_default()
+        role_font = ImageFont.load_default()
 
-    with col2:
-        st.subheader("Smart Crop Preview (300x400)")
-        with st.spinner("Detecting face and cropping..."):
-            # Run the smart crop function
-            processed_img, status = smart_face_crop(original_image, target_w=300, target_h=400)
+    # Draw Header Text
+    draw.text((30, 25), "EMPLOYEE ID", font=header_font, fill=WHITE)
+
+    # --- PROCESS PHOTO ---
+    photo_w, photo_h = 300, 400
+    photo_x, photo_y = 50, 150
+    crop_status = ""
+
+    if photo_upload is not None:
+        try:
+            raw_img = Image.open(photo_upload)
             
-            # Display status tag
-            if "Found" in status:
-                st.success(status)
-            else:
-                st.warning(status)
-                
-            # Show the result
-            st.image(processed_img)
+            # --- USE SMART CROP HERE ---
+            processed_img, crop_status = smart_face_crop(raw_img, photo_w, photo_h)
             
-            # Download button for the processed image
-            buf = io.BytesIO()
-            processed_img.save(buf, format="PNG")
-            byte_im = buf.getvalue()
-            st.download_button(
-                label="Download Processed Photo",
-                data=byte_im,
-                file_name="smart_cropped_photo.png",
-                mime="image/png"
-            )
+            # Add Border
+            img_with_border = ImageOps.expand(processed_img, border=3, fill=BLACK)
+            
+            # Paste onto card
+            card.paste(img_with_border, (photo_x, photo_y))
+        except Exception as e:
+            st.error(f"Error processing image: {e}")
+    else:
+        # Placeholder
+        draw.rectangle([(photo_x, photo_y), (photo_x+photo_w, photo_y+photo_h)], outline=BLACK)
+        draw.text((photo_x + 80, photo_y + 180), "No Photo", fill=BLACK)
+
+    # --- DRAW TEXT DETAILS ---
+    text_x = 400
+    text_y = 180
+    spacing = 110
+
+    # Name
+    draw.text((text_x, text_y), "Name:", font=subtitle_font, fill=BLUE)
+    draw.text((text_x, text_y + 40), name, font=title_font, fill=BLACK)
+
+    # Role
+    draw.text((text_x, text_y + spacing), "Role:", font=subtitle_font, fill=BLUE)
+    draw.text((text_x, text_y + spacing + 40), role, font=role_font, fill=BLACK)
+
+    #
