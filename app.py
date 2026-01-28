@@ -136,4 +136,54 @@ def generate_card(name, id_number, role, photo_upload):
     draw.text((text_x, text_y + spacing), "Role:", font=subtitle_font, fill=BLUE)
     draw.text((text_x, text_y + spacing + 40), role, font=role_font, fill=BLACK)
 
-    #
+    # ID Number
+    draw.text((text_x, text_y + spacing * 2), "ID Number:", font=subtitle_font, fill=BLUE)
+    draw.text((text_x, text_y + spacing * 2 + 40), id_number, font=title_font, fill=BLACK)
+
+    return card, crop_status
+
+# --- 3. STREAMLIT INTERFACE ---
+st.set_page_config(page_title="ID Generator", layout="centered")
+
+st.title("🪪 Smart ID Card Generator")
+st.write("Upload a photo, and our AI will automatically center-crop the face onto the card.")
+
+# Create Form
+with st.form("id_card_form"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        name_in = st.text_input("Full Name", "John Doe")
+        role_in = st.text_input("Job Title", "Software Engineer")
+    
+    with col2:
+        id_in = st.text_input("ID Number", "8493021")
+        photo_in = st.file_uploader("Upload Photo", type=["jpg", "png", "jpeg"])
+        
+    submitted = st.form_submit_button("Generate Card")
+
+if submitted:
+    if name_in and id_in:
+        with st.spinner("Detecting face and generating card..."):
+            final_card, status_msg = generate_card(name_in, id_in, role_in, photo_in)
+            
+            if "No face" in status_msg:
+                st.warning(f"⚠️ {status_msg}")
+            elif status_msg:
+                st.success(f"✅ {status_msg}")
+
+            st.image(final_card, caption="Final ID Card Preview", use_container_width=True)
+
+            # Download Button
+            buf = io.BytesIO()
+            final_card.save(buf, format="PNG")
+            byte_im = buf.getvalue()
+
+            st.download_button(
+                label="Download ID Card (PNG)",
+                data=byte_im,
+                file_name=f"{name_in}_ID.png",
+                mime="image/png"
+            )
+    else:
+        st.error("Please fill in all text fields.")
