@@ -1,189 +1,239 @@
 import streamlit as st
-import cv2
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-import io
+import pandas as pd
+import os
+import hashlib
+import urllib.parse
+from datetime import datetime, date
+from fpdf import FPDF
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# --- 1. SMART FACE CROP FUNCTION (Unchanged) ---
-def smart_face_crop(pil_image, target_w=300, target_h=400):
-    """
-    Detects a face, adds padding, crops, and resizes to target dimensions.
-    """
-    # Fix Orientation
-    pil_image = ImageOps.exif_transpose(pil_image)
+# ================= CONFIG =================
+SHEET_NAME = "Welfare_Database"
+DATA_FILE = "welfare_database.csv"
+MEMBERS_FILE = "members.csv"
+AUDIT_FILE = "audit_log.csv"
+MASTER_PASSWORD = "secure999"
 
-    # Convert to OpenCV format
-    img_np = np.array(pil_image.convert('RGB'))
-    cv_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+TRANSACTION_TYPES = [
+    "Welfare Amount",
+    "Loan Taken",
+    "Loan Repayment",
+    "Loan Processing Fee",
+    "Loan Extension Fee"
+]
 
-    # Load Face Detector
-    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    face_cascade = cv2.CascadeClassifier(cascade_path)
+# ================= SECURITY =================
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
-    # Detect faces
-    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
+# ================= GOOGLE SHEETS =================
+def connect_to_gsheet():
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        st.secrets["gcp_service_account"],
+        ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+    )
+    return gspread.authorize(creds).open(SHEET_NAME)
 
-    status_text = ""
-    
-    if len(faces) > 0:
-        status_text = "Face detected."
-        largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
-        x, y, w, h = largest_face
-
-        # Add Padding
-        pad_h = int(h * 0.25)
-        pad_w = int(w * 0.15)
-
-        img_h_cv, img_w_cv, _ = cv_img.shape
-        y1 = max(0, y - pad_h)
-        y2 = min(img_h_cv, y + h + pad_h)
-        x1 = max(0, x - pad_w)
-        x2 = min(img_w_cv, x + w + pad_w)
-
-        cropped_cv = cv_img[y1:y2, x1:x2]
-        img_to_resize = Image.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
-    else:
-        status_text = "No face detected. Center crop used."
-        img_to_resize = pil_image
-
-    # Smart Resize
-    final_img = ImageOps.fit(
-        img_to_resize, 
-        (target_w, target_h), 
-        method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5)
+# ================= AUDIT =================
+def log_action(user, action):
+    row = {
+        "Time": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "User": user,
+        "Action": action
+    }
+    pd.DataFrame([row]).to_csv(
+        AUDIT_FILE,
+        mode="a",
+        header=not os.path.exists(AUDIT_FILE),
+        index=False
     )
 
-    return final_img, status_text
+# ================= DATA =================
+def load_data():
+    if os.path.exists(DATA_FILE):
+        df = pd.read_csv(DATA_FILE)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+        return df
+    return pd.DataFrame(columns=["Date", "Name", "Type", "Amount", "Notes"])
 
-# --- 2. VERTICAL CARD GENERATOR ---
-def generate_vertical_card(name, id_number, role, photo_upload):
-    # CR80 Vertical Dimensions @ 300 DPI
-    # Swapped: Width is now thinner, Height is taller
-    DPI = 300
-    WIDTH = int(2.125 * DPI)  # approx 637 px
-    HEIGHT = int(3.370 * DPI) # approx 1011 px
-    
-    # Colors
-    WHITE = (255, 255, 255)
-    BLACK = (0, 0, 0)
-    BLUE = (0, 50, 150)
-    GREY_TEXT = (80, 80, 80)
-    
-    # Create Canvas
-    card = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
-    draw = ImageDraw.Draw(card)
-    
-    # --- A. HEADER ---
-    header_height = 120
-    draw.rectangle([(0, 0), (WIDTH, header_height)], fill=BLUE)
-    
-    # Fonts
-    try:
-        # Slightly smaller fonts for vertical width constraints
-        header_font = ImageFont.truetype("arial.ttf", 50)
-        title_font = ImageFont.truetype("arial.ttf", 45)  # For Name
-        subtitle_font = ImageFont.truetype("arial.ttf", 30) # For Labels
-        role_font = ImageFont.truetype("arial.ttf", 35)     # For Role
-    except IOError:
-        header_font = ImageFont.load_default()
-        title_font = ImageFont.load_default()
-        subtitle_font = ImageFont.load_default()
-        role_font = ImageFont.load_default()
+def save_data(df):
+    df2 = df.copy()
+    df2["Date"] = df2["Date"].dt.strftime("%d/%m/%Y")
+    df2.to_csv(DATA_FILE, index=False)
 
-    # Draw Header Text (Centered)
-    # anchor="mm" means we position based on the Middle-Middle of the text
-    draw.text((WIDTH/2, header_height/2), "EMPLOYEE ID", font=header_font, fill=WHITE, anchor="mm")
+    sh = connect_to_gsheet()
+    wk = sh.worksheet("Transactions")
+    wk.clear()
+    wk.update([df2.columns.tolist()] + df2.values.tolist())
 
-    # --- B. PHOTO (Centered) ---
-    photo_w, photo_h = 300, 400
-    # Calculate X to center the photo: (CardWidth - PhotoWidth) / 2
-    photo_x = (WIDTH - photo_w) // 2 
-    photo_y = 160 # Start a bit below the header
-    
-    crop_status = ""
+# ================= MEMBERS =================
+def load_members():
+    if os.path.exists(MEMBERS_FILE):
+        return pd.read_csv(MEMBERS_FILE)["Name"].tolist()
+    sh = connect_to_gsheet()
+    wk = sh.worksheet("Members")
+    names = [r["Name"] for r in wk.get_all_records()]
+    pd.DataFrame(names, columns=["Name"]).to_csv(MEMBERS_FILE, index=False)
+    return names
 
-    if photo_upload is not None:
-        try:
-            raw_img = Image.open(photo_upload)
-            processed_img, crop_status = smart_face_crop(raw_img, photo_w, photo_h)
-            
-            # Border
-            img_with_border = ImageOps.expand(processed_img, border=4, fill=BLACK)
-            
-            # Paste (Adjust x/y for border size)
-            card.paste(img_with_border, (photo_x - 4, photo_y - 4))
-        except Exception as e:
-            st.error(f"Error: {e}")
-    else:
-        # Placeholder
-        draw.rectangle([(photo_x, photo_y), (photo_x+photo_w, photo_y+photo_h)], outline=BLACK)
-        draw.text((WIDTH/2, photo_y + 180), "No Photo", fill=BLACK, anchor="mm")
+# ================= USERS =================
+def load_users():
+    sh = connect_to_gsheet()
+    return pd.DataFrame(sh.worksheet("Users").get_all_records())
 
-    # --- C. TEXT DETAILS (Centered Below Photo) ---
-    # We use anchor="ma" (Middle-Ascender) or "mt" (Middle-Top) for easy centering
-    
-    # Name
-    current_y = photo_y + photo_h + 50
-    draw.text((WIDTH/2, current_y), name, font=title_font, fill=BLACK, anchor="mt")
-    
-    # Role
-    current_y += 60
-    draw.text((WIDTH/2, current_y), role, font=role_font, fill=BLUE, anchor="mt")
-    
-    # Divider Line
-    line_y = current_y + 60
-    draw.line([(100, line_y), (WIDTH-100, line_y)], fill=GREY_TEXT, width=2)
+# ================= ALERTS =================
+def generate_alerts(df, members):
+    alerts = []
+    today = pd.Timestamp.today()
 
-    # ID Number Label
-    current_y = line_y + 30
-    draw.text((WIDTH/2, current_y), "ID NUMBER", font=subtitle_font, fill=GREY_TEXT, anchor="mt")
-    
-    # ID Number Value
-    current_y += 40
-    draw.text((WIDTH/2, current_y), id_number, font=title_font, fill=BLACK, anchor="mt")
+    welfare = df[df["Type"] == "Welfare Amount"]["Amount"].sum()
+    loans = df[df["Type"] == "Loan Taken"]["Amount"].sum() - \
+            df[df["Type"] == "Loan Repayment"]["Amount"].sum()
 
-    # Optional: Bottom Bar
-    draw.rectangle([(0, HEIGHT-30), (WIDTH, HEIGHT)], fill=BLUE)
+    if welfare - loans < 1000:
+        alerts.append(f"⚠️ Low Welfare Balance: {welfare - loans:,.0f}")
 
-    return card, crop_status
+    for m in members:
+        mdf = df[df["Name"] == m]
+        bal = mdf[mdf["Type"] == "Loan Taken"]["Amount"].sum() - \
+              mdf[mdf["Type"] == "Loan Repayment"]["Amount"].sum()
 
-# --- 3. STREAMLIT INTERFACE ---
-st.set_page_config(page_title="Vertical ID Gen", layout="centered")
+        last_pay = mdf[mdf["Type"] == "Loan Repayment"]["Date"].max()
 
-st.title("🪪 Vertical ID Card Generator")
-st.write("Generates a standard CR80 Portrait ID (2.125\" x 3.37\").")
+        if bal > 0 and pd.notna(last_pay):
+            if (today - last_pay).days > 30:
+                alerts.append(f"🚨 {m} loan overdue")
 
-with st.form("id_card_form"):
-    col1, col2 = st.columns(2)
-    with col1:
-        name_in = st.text_input("Full Name", "Jane Doe")
-        role_in = st.text_input("Role", "Project Manager")
-    with col2:
-        id_in = st.text_input("ID Number", "99887766")
-        photo_in = st.file_uploader("Upload Photo", type=["jpg", "png", "jpeg"])
-        
-    submitted = st.form_submit_button("Generate Vertical Card")
+        this_month = today.strftime("%B %Y")
+        paid = mdf[
+            (mdf["Type"] == "Welfare Amount") &
+            (mdf["Date"].dt.strftime("%B %Y") == this_month)
+        ]
+        if paid.empty:
+            alerts.append(f"📅 {m} missing welfare ({this_month})")
 
-if submitted:
-    if name_in and id_in:
-        final_card, status_msg = generate_vertical_card(name_in, id_in, role_in, photo_in)
-        
-        if "No face" in status_msg:
-            st.warning(status_msg)
-        
-        # Display
-        st.image(final_card, caption="Vertical Preview", use_container_width=True)
+    return alerts
 
-        # Download
-        buf = io.BytesIO()
-        final_card.save(buf, format="PNG")
-        byte_im = buf.getvalue()
+# ================= PDF =================
+class PDF(FPDF):
+    def header(self):
+        self.set_font("Arial", "B", 14)
+        self.cell(0, 10, "Welfare Report", ln=True, align="C")
 
-        st.download_button(
-            label="Download ID Card",
-            data=byte_im,
-            file_name=f"{name_in}_ID_Vertical.png",
-            mime="image/png"
-        )
+def member_pdf(name, df, balance):
+    pdf = PDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 8, f"Member: {name}", ln=True)
+    pdf.cell(0, 8, f"Loan Balance: {balance:,.0f}", ln=True)
+    pdf.ln(5)
+
+    for _, r in df.iterrows():
+        pdf.cell(0, 6, f"{r['Date'].strftime('%d/%m/%Y')} | {r['Type']} | {r['Amount']}", ln=True)
+
+    return pdf.output(dest="S").encode("latin-1")
+
+# ================= LOGIN =================
+def login():
+    st.title("🔒 Login")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
+    if st.button("Login"):
+        users = load_users()
+        match = users[
+            (users["Username"] == u) &
+            (users["Password"] == hash_password(p))
+        ]
+        if not match.empty:
+            st.session_state.user = u
+            st.session_state.role = match.iloc[0]["Role"]
+            st.rerun()
+        else:
+            st.error("Invalid login")
+
+# ================= MAIN =================
+def app():
+    st.sidebar.write(f"👤 {st.session_state.user}")
+    if st.sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+
+    df = load_data()
+    members = load_members()
+
+    # SEARCH
+    search = st.text_input("🔍 Search")
+    if search:
+        df = df[
+            df["Name"].str.contains(search, case=False, na=False) |
+            df["Notes"].str.contains(search, case=False, na=False) |
+            df["Type"].str.contains(search, case=False, na=False)
+        ]
+
+    # ALERTS
+    alerts = generate_alerts(df, members)
+    if alerts:
+        st.subheader("🚨 Alerts")
+        for a in alerts:
+            st.error(a)
+
+    # DASHBOARD
+    st.subheader("📊 Dashboard")
+    welfare = df[df["Type"] == "Welfare Amount"]["Amount"].sum()
+    loans = df[df["Type"] == "Loan Taken"]["Amount"].sum() - \
+            df[df["Type"] == "Loan Repayment"]["Amount"].sum()
+    fees = df[df["Type"].str.contains("Fee")]["Amount"].sum()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Welfare", f"{welfare:,.0f}")
+    c2.metric("Loans", f"{loans:,.0f}")
+    c3.metric("Fees", f"{fees:,.0f}")
+
+    chart = pd.DataFrame({
+        "Amount": [loans, welfare - loans, fees]
+    }, index=["Loans", "Available", "Fees"])
+    st.bar_chart(chart)
+
+    # INDIVIDUAL
+    st.subheader("👤 Member View")
+    m = st.selectbox("Select Member", members)
+    mdf = df[df["Name"] == m]
+    bal = mdf[mdf["Type"] == "Loan Taken"]["Amount"].sum() - \
+          mdf[mdf["Type"] == "Loan Repayment"]["Amount"].sum()
+
+    if not mdf.empty:
+        pdf = member_pdf(m, mdf, bal)
+        st.download_button("📄 Download PDF", pdf, f"{m}.pdf")
+
+        if bal > 0:
+            msg = f"Hi {m}, your loan balance is {bal:,.0f}"
+            st.link_button("💬 WhatsApp Reminder",
+                           f"https://wa.me/?text={urllib.parse.quote(msg)}")
+
+    st.dataframe(mdf, use_container_width=True)
+
+    # EDIT (ADMIN)
+    if st.session_state.role == "admin":
+        st.subheader("✏️ Edit Data")
+        edited = st.data_editor(df, num_rows="dynamic")
+        mp = st.text_input("Master Password", type="password")
+        if st.button("Save Changes"):
+            if mp == MASTER_PASSWORD:
+                save_data(edited)
+                log_action(st.session_state.user, "Edited Database")
+                st.success("Saved")
+                st.rerun()
+            else:
+                st.error("Wrong password")
+
+        if os.path.exists(AUDIT_FILE):
+            st.subheader("🧾 Audit Log")
+            st.dataframe(pd.read_csv(AUDIT_FILE))
+
+# ================= START =================
+if "user" not in st.session_state:
+    login()
+else:
+    app()
