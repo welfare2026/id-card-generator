@@ -4,20 +4,17 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import io
 
-# --- 1. SMART FACE CROP FUNCTION ---
+# --- 1. SMART FACE CROP FUNCTION (Unchanged) ---
 def smart_face_crop(pil_image, target_w=300, target_h=400):
     """
     Detects a face, adds padding, crops, and resizes to target dimensions.
-    Falls back to center-crop if no face is detected.
     """
-    # Fix Orientation from phone cameras
+    # Fix Orientation
     pil_image = ImageOps.exif_transpose(pil_image)
 
-    # Convert to OpenCV format (BGR numpy array)
+    # Convert to OpenCV format
     img_np = np.array(pil_image.convert('RGB'))
     cv_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    
-    # Convert to grayscale for detection
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
 
     # Load Face Detector
@@ -30,12 +27,11 @@ def smart_face_crop(pil_image, target_w=300, target_h=400):
     status_text = ""
     
     if len(faces) > 0:
-        status_text = f"Face detected. Cropping to fit."
-        # Find largest face
+        status_text = "Face detected."
         largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
         x, y, w, h = largest_face
 
-        # Add Padding (25% vertical, 15% horizontal)
+        # Add Padding
         pad_h = int(h * 0.25)
         pad_w = int(w * 0.15)
 
@@ -45,16 +41,13 @@ def smart_face_crop(pil_image, target_w=300, target_h=400):
         x1 = max(0, x - pad_w)
         x2 = min(img_w_cv, x + w + pad_w)
 
-        # Crop
         cropped_cv = cv_img[y1:y2, x1:x2]
-        
-        # Convert back to PIL
         img_to_resize = Image.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
     else:
-        status_text = "No face detected. Using center crop."
+        status_text = "No face detected. Center crop used."
         img_to_resize = pil_image
 
-    # Final Smart Resize
+    # Smart Resize
     final_img = ImageOps.fit(
         img_to_resize, 
         (target_w, target_h), 
@@ -64,126 +57,133 @@ def smart_face_crop(pil_image, target_w=300, target_h=400):
 
     return final_img, status_text
 
-# --- 2. ID CARD GENERATOR FUNCTION ---
-def generate_card(name, id_number, role, photo_upload):
-    # CR80 Dimensions @ 300 DPI
+# --- 2. VERTICAL CARD GENERATOR ---
+def generate_vertical_card(name, id_number, role, photo_upload):
+    # CR80 Vertical Dimensions @ 300 DPI
+    # Swapped: Width is now thinner, Height is taller
     DPI = 300
-    WIDTH = int(3.370 * DPI)  # 1011 px
-    HEIGHT = int(2.125 * DPI) # 637 px
+    WIDTH = int(2.125 * DPI)  # approx 637 px
+    HEIGHT = int(3.370 * DPI) # approx 1011 px
     
     # Colors
     WHITE = (255, 255, 255)
     BLACK = (0, 0, 0)
     BLUE = (0, 50, 150)
+    GREY_TEXT = (80, 80, 80)
     
     # Create Canvas
     card = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
     draw = ImageDraw.Draw(card)
     
-    # Draw Header
+    # --- A. HEADER ---
     header_height = 120
     draw.rectangle([(0, 0), (WIDTH, header_height)], fill=BLUE)
     
     # Fonts
     try:
-        title_font = ImageFont.truetype("arial.ttf", 60)
-        subtitle_font = ImageFont.truetype("arial.ttf", 35)
-        header_font = ImageFont.truetype("arial.ttf", 65)
-        role_font = ImageFont.truetype("arial.ttf", 45)
+        # Slightly smaller fonts for vertical width constraints
+        header_font = ImageFont.truetype("arial.ttf", 50)
+        title_font = ImageFont.truetype("arial.ttf", 45)  # For Name
+        subtitle_font = ImageFont.truetype("arial.ttf", 30) # For Labels
+        role_font = ImageFont.truetype("arial.ttf", 35)     # For Role
     except IOError:
+        header_font = ImageFont.load_default()
         title_font = ImageFont.load_default()
         subtitle_font = ImageFont.load_default()
-        header_font = ImageFont.load_default()
         role_font = ImageFont.load_default()
 
-    # Draw Header Text
-    draw.text((30, 25), "EMPLOYEE ID", font=header_font, fill=WHITE)
+    # Draw Header Text (Centered)
+    # anchor="mm" means we position based on the Middle-Middle of the text
+    draw.text((WIDTH/2, header_height/2), "EMPLOYEE ID", font=header_font, fill=WHITE, anchor="mm")
 
-    # --- PROCESS PHOTO ---
+    # --- B. PHOTO (Centered) ---
     photo_w, photo_h = 300, 400
-    photo_x, photo_y = 50, 150
+    # Calculate X to center the photo: (CardWidth - PhotoWidth) / 2
+    photo_x = (WIDTH - photo_w) // 2 
+    photo_y = 160 # Start a bit below the header
+    
     crop_status = ""
 
     if photo_upload is not None:
         try:
             raw_img = Image.open(photo_upload)
-            
-            # --- USE SMART CROP HERE ---
             processed_img, crop_status = smart_face_crop(raw_img, photo_w, photo_h)
             
-            # Add Border
-            img_with_border = ImageOps.expand(processed_img, border=3, fill=BLACK)
+            # Border
+            img_with_border = ImageOps.expand(processed_img, border=4, fill=BLACK)
             
-            # Paste onto card
-            card.paste(img_with_border, (photo_x, photo_y))
+            # Paste (Adjust x/y for border size)
+            card.paste(img_with_border, (photo_x - 4, photo_y - 4))
         except Exception as e:
-            st.error(f"Error processing image: {e}")
+            st.error(f"Error: {e}")
     else:
         # Placeholder
         draw.rectangle([(photo_x, photo_y), (photo_x+photo_w, photo_y+photo_h)], outline=BLACK)
-        draw.text((photo_x + 80, photo_y + 180), "No Photo", fill=BLACK)
+        draw.text((WIDTH/2, photo_y + 180), "No Photo", fill=BLACK, anchor="mm")
 
-    # --- DRAW TEXT DETAILS ---
-    text_x = 400
-    text_y = 180
-    spacing = 110
-
+    # --- C. TEXT DETAILS (Centered Below Photo) ---
+    # We use anchor="ma" (Middle-Ascender) or "mt" (Middle-Top) for easy centering
+    
     # Name
-    draw.text((text_x, text_y), "Name:", font=subtitle_font, fill=BLUE)
-    draw.text((text_x, text_y + 40), name, font=title_font, fill=BLACK)
-
+    current_y = photo_y + photo_h + 50
+    draw.text((WIDTH/2, current_y), name, font=title_font, fill=BLACK, anchor="mt")
+    
     # Role
-    draw.text((text_x, text_y + spacing), "Role:", font=subtitle_font, fill=BLUE)
-    draw.text((text_x, text_y + spacing + 40), role, font=role_font, fill=BLACK)
+    current_y += 60
+    draw.text((WIDTH/2, current_y), role, font=role_font, fill=BLUE, anchor="mt")
+    
+    # Divider Line
+    line_y = current_y + 60
+    draw.line([(100, line_y), (WIDTH-100, line_y)], fill=GREY_TEXT, width=2)
 
-    # ID Number
-    draw.text((text_x, text_y + spacing * 2), "ID Number:", font=subtitle_font, fill=BLUE)
-    draw.text((text_x, text_y + spacing * 2 + 40), id_number, font=title_font, fill=BLACK)
+    # ID Number Label
+    current_y = line_y + 30
+    draw.text((WIDTH/2, current_y), "ID NUMBER", font=subtitle_font, fill=GREY_TEXT, anchor="mt")
+    
+    # ID Number Value
+    current_y += 40
+    draw.text((WIDTH/2, current_y), id_number, font=title_font, fill=BLACK, anchor="mt")
+
+    # Optional: Bottom Bar
+    draw.rectangle([(0, HEIGHT-30), (WIDTH, HEIGHT)], fill=BLUE)
 
     return card, crop_status
 
 # --- 3. STREAMLIT INTERFACE ---
-st.set_page_config(page_title="ID Generator", layout="centered")
+st.set_page_config(page_title="Vertical ID Gen", layout="centered")
 
-st.title("🪪 Smart ID Card Generator")
-st.write("Upload a photo, and our AI will automatically center-crop the face onto the card.")
+st.title("🪪 Vertical ID Card Generator")
+st.write("Generates a standard CR80 Portrait ID (2.125\" x 3.37\").")
 
-# Create Form
 with st.form("id_card_form"):
     col1, col2 = st.columns(2)
-    
     with col1:
-        name_in = st.text_input("Full Name", "John Doe")
-        role_in = st.text_input("Job Title", "Software Engineer")
-    
+        name_in = st.text_input("Full Name", "Jane Doe")
+        role_in = st.text_input("Role", "Project Manager")
     with col2:
-        id_in = st.text_input("ID Number", "8493021")
+        id_in = st.text_input("ID Number", "99887766")
         photo_in = st.file_uploader("Upload Photo", type=["jpg", "png", "jpeg"])
         
-    submitted = st.form_submit_button("Generate Card")
+    submitted = st.form_submit_button("Generate Vertical Card")
 
 if submitted:
     if name_in and id_in:
-        with st.spinner("Detecting face and generating card..."):
-            final_card, status_msg = generate_card(name_in, id_in, role_in, photo_in)
-            
-            if "No face" in status_msg:
-                st.warning(f"⚠️ {status_msg}")
-            elif status_msg:
-                st.success(f"✅ {status_msg}")
+        final_card, status_msg = generate_vertical_card(name_in, id_in, role_in, photo_in)
+        
+        if "No face" in status_msg:
+            st.warning(status_msg)
+        
+        # Display
+        st.image(final_card, caption="Vertical Preview", use_container_width=True)
 
-            st.image(final_card, caption="Final ID Card Preview", use_container_width=True)
+        # Download
+        buf = io.BytesIO()
+        final_card.save(buf, format="PNG")
+        byte_im = buf.getvalue()
 
-            # Download Button
-            buf = io.BytesIO()
-            final_card.save(buf, format="PNG")
-            byte_im = buf.getvalue()
-
-            st.download_button(
-                label="Download ID Card (PNG)",
-                data=byte_im,
-                file_name=f"{name_in}_ID.png",
-                mime="image/png"
-            )
-    else:
-        st.error("Please fill in all text fields.")
+        st.download_button(
+            label="Download ID Card",
+            data=byte_im,
+            file_name=f"{name_in}_ID_Vertical.png",
+            mime="image/png"
+        )
