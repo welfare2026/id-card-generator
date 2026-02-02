@@ -1,4 +1,6 @@
 streamlit
-Pillow
-numpy
-opencv-python-headless
+pandas
+openpyxl
+fpdf
+gspread
+oauth2client
