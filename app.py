@@ -82,7 +82,7 @@ def delete_transaction_record(txn_id, details_str):
         return True
     except: return False
 
-# --- ALERT SYSTEM (RE-ADDED) ---
+# --- ALERT SYSTEM ---
 def generate_alerts(df, members_df):
     alerts = []
     if df.empty: return alerts
@@ -101,23 +101,20 @@ def generate_alerts(df, members_df):
         active_members = members_df[members_df["Status"] == "Active"]["Name"].tolist()
         
         today = date.today()
-        current_month_key = today.strftime('%Y-%m') # e.g. 2023-10
+        current_month_key = today.strftime('%Y-%m')
         current_month_name = today.strftime('%B')
         
         for m in active_members:
-            # Check if this member has a 'Welfare Amount' transaction in the current month
             has_paid = df[
                 (df["Name"] == m) & 
                 (df["Type"] == "Welfare Amount") & 
                 (df["Month"] == current_month_key)
             ]
-            
             if has_paid.empty:
                 alerts.append(f"📅 **Missing Welfare:** {m} hasn't paid for {current_month_name}")
 
     return alerts
-
-# --- MEMBER MANAGEMENT ---
+    # --- MEMBER MANAGEMENT ---
 def load_members_data():
     if not supabase: return pd.DataFrame()
     try:
@@ -260,8 +257,7 @@ def create_monthly_pdf(month_name, df):
         d = row['Date'].strftime('%d/%m/%Y') if pd.notna(row['Date']) else ""
         pdf.cell(30, 10, d, 1); pdf.cell(40, 10, str(row['Name']), 1); pdf.cell(50, 10, str(row['Type']), 1); pdf.cell(30, 10, str(row['Amount']), 1); pdf.ln()
     return pdf.output(dest='S').encode('latin-1')
-
-# --- LOGIN ---
+    # --- LOGIN ---
 def login_screen():
     st.title("🔒 Login Required")
     with st.form("login"):
@@ -451,4 +447,29 @@ def main_app():
                 if not members_df.empty and person in members_df["Name"].values:
                     try: ph = str(members_df.loc[members_df["Name"] == person, "Phone"].values[0])
                     except: pass
-                c2.link_button("💬 WhatsApp", get_whatsapp_link(ph, f"Hi {pe
+                c2.link_button("💬 WhatsApp", get_whatsapp_link(ph, f"Hi {person}, Balance: {bal:,.0f}"))
+                p_df["Date"] = p_df["Date"].dt.strftime('%d/%m/%Y')
+                st.dataframe(p_df, use_container_width=True, hide_index=True)
+
+    # MONTHLY
+    with web_tabs[3]: 
+        if not df.empty:
+            month = st.selectbox("Month", df["Month_Str"].unique())
+            m_df = df[df["Month_Str"] == month]
+            st.download_button("📄 Download", create_monthly_pdf(month, m_df), f"{month}.pdf", "application/pdf")
+            m_df["Date"] = m_df["Date"].dt.strftime('%d/%m/%Y')
+            st.dataframe(m_df, use_container_width=True, hide_index=True)
+
+    # AUDIT LOGS
+    with web_tabs[4]:
+        st.subheader("📜 System Audit Logs")
+        if st.session_state["user_role"] == "admin":
+            audit_df = load_audit_logs()
+            if not audit_df.empty: st.dataframe(audit_df, use_container_width=True, hide_index=True)
+            else: st.info("No logs found.")
+        else: st.error("Admin Access Required")
+
+if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
+if not st.session_state["logged_in"]: login_screen()
+else: main_app()
+                    
