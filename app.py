@@ -25,101 +25,101 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# --- DATA ENGINE (DIRECT DB) ---
+# --- AUDIT ENGINE ---
+def log_audit(action, details):
+    """Records an action to the cloud audit log"""
+    if not supabase: return
+    try:
+        user = st.session_state.get("username", "Unknown")
+        supabase.table("audit_logs").insert({
+            "username": user,
+            "action": action,
+            "details": details
+        }).execute()
+    except: pass
 
-def load_data():
-    """Fetches all transactions directly from Supabase"""
+def load_audit_logs():
     if not supabase: return pd.DataFrame()
     try:
-        # Fetch all rows
+        # Fetch last 100 logs
+        response = supabase.table("audit_logs").select("*").order("created_at", desc=True).limit(100).execute()
+        df = pd.DataFrame(response.data)
+        if not df.empty:
+            df = df.rename(columns={"created_at": "Time", "username": "User", "action": "Action", "details": "Details"})
+            df["Time"] = pd.to_datetime(df["Time"]).dt.strftime('%d/%m/%Y %H:%M')
+        return df
+    except: return pd.DataFrame()
+
+# --- DATA ENGINE ---
+
+def load_data():
+    if not supabase: return pd.DataFrame()
+    try:
         response = supabase.table("transactions").select("*").execute()
         df = pd.DataFrame(response.data)
-        
         if not df.empty:
-            # Standardize columns to match app logic (Capitalized)
-            df = df.rename(columns={
-                "date": "Date", 
-                "name": "Name", 
-                "type": "Type", 
-                "amount": "Amount", 
-                "notes": "Notes"
-            })
+            df = df.rename(columns={"date": "Date", "name": "Name", "type": "Type", "amount": "Amount", "notes": "Notes", "id": "ID"})
             df["Date"] = pd.to_datetime(df["Date"])
             df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0)
-            
-            # Add derived Month columns for charts
             df["Month"] = df["Date"].dt.strftime('%Y-%m')
             df["Month_Str"] = df["Date"].dt.strftime('%B %Y')
             return df
-    except Exception as e:
-        st.error(f"Database Error: {e}")
-    
+    except Exception as e: st.error(f"DB Error: {e}")
     return pd.DataFrame(columns=["Date", "Name", "Type", "Amount", "Notes"])
 
 def append_transaction(date_obj, name, txn_type, amount, note):
-    """Inserts directly into Supabase"""
     if not supabase: return False
     try:
-        data = {
-            "date": date_obj.strftime("%Y-%m-%d"),
-            "name": name,
-            "type": txn_type,
-            "amount": amount,
-            "notes": note
-        }
+        data = {"date": date_obj.strftime("%Y-%m-%d"), "name": name, "type": txn_type, "amount": amount, "notes": note}
         supabase.table("transactions").insert(data).execute()
+        log_audit("Add Transaction", f"{name} | {txn_type} | {amount}")
         return True
-    except Exception as e:
-        st.error(f"Save Failed: {e}")
-        return False
+    except: return False
 
-# --- MEMBER MANAGEMENT (DB) ---
+def delete_transaction_record(txn_id, details_str):
+    if not supabase: return False
+    try:
+        supabase.table("transactions").delete().eq("id", txn_id).execute()
+        log_audit("Delete Transaction", f"Deleted ID {txn_id}: {details_str}")
+        return True
+    except: return False
+
+# --- MEMBER MANAGEMENT ---
 
 def load_members_data():
-    """Fetches members with Name, Phone, Status"""
     if not supabase: return pd.DataFrame()
     try:
         response = supabase.table("members").select("*").execute()
         df = pd.DataFrame(response.data)
-        
-        # Normalize columns
         if not df.empty:
             df = df.rename(columns={"name": "Name", "phone": "Phone", "status": "Status"})
-            # Handle potential nulls
             df["Status"] = df["Status"].fillna("Active")
             df["Phone"] = df["Phone"].astype(str).replace("None", "")
-        else:
-            return pd.DataFrame(columns=["Name", "Phone", "Status"])
-            
+        else: return pd.DataFrame(columns=["Name", "Phone", "Status"])
         return df
     except: return pd.DataFrame()
 
 def add_member(name, phone):
     if not supabase: return False
     try:
-        # Check if exists first (Supabase has unique constraint, but this is cleaner)
-        supabase.table("members").insert({
-            "name": name, 
-            "phone": str(phone), 
-            "status": "Active"
-        }).execute()
+        supabase.table("members").insert({"name": name, "phone": str(phone), "status": "Active"}).execute()
+        log_audit("Add Member", f"Added {name}")
         return True
-    except Exception as e: 
-        st.error(f"Error: {e}")
-        return False
+    except: return False
 
 def update_member_phone(name, new_phone):
     if not supabase: return False
     try:
         supabase.table("members").update({"phone": str(new_phone)}).eq("name", name).execute()
+        log_audit("Update Phone", f"Updated {name} to {new_phone}")
         return True
     except: return False
 
 def archive_member(name):
-    """Soft delete: Update status to Archived"""
     if not supabase: return False
     try:
         supabase.table("members").update({"status": "Archived"}).eq("name", name).execute()
+        log_audit("Archive Member", f"Archived {name}")
         return True
     except: return False
 
@@ -129,8 +129,7 @@ def load_users():
     try:
         response = supabase.table("app_users").select("*").execute()
         df = pd.DataFrame(response.data)
-        if not df.empty:
-             df = df.rename(columns={"username": "Username", "password": "Password", "role": "Role"})
+        if not df.empty: df = df.rename(columns={"username": "Username", "password": "Password", "role": "Role"})
         return df
     except: return pd.DataFrame()
 
@@ -138,6 +137,7 @@ def add_user(u, p, r):
     if not supabase: return False
     try:
         supabase.table("app_users").insert({"username": u, "password": p, "role": r}).execute()
+        log_audit("Add User", f"Created user {u} as {r}")
         return True
     except: return False
 
@@ -145,19 +145,19 @@ def delete_user(u):
     if not supabase: return False
     try:
         supabase.table("app_users").delete().eq("username", u).execute()
+        log_audit("Delete User", f"Deleted user {u}")
         return True
     except: return False
 
-# --- HELPER: WHATSAPP ---
+# --- HELPER ---
 def get_whatsapp_link(phone, msg):
     encoded_msg = urllib.parse.quote(msg)
-    if phone and str(phone).strip() and str(phone).lower() != "nan" and str(phone).lower() != "none":
+    if phone and str(phone).strip() and str(phone).lower() not in ["nan", "none", ""]:
         clean_phone = str(phone).replace(" ", "").replace("+", "").replace("-", "").replace(".", "")
         return f"https://wa.me/{clean_phone}?text={encoded_msg}"
-    else:
-        return f"https://wa.me/?text={encoded_msg}"
+    return f"https://wa.me/?text={encoded_msg}"
 
-# --- PDF GENERATION ---
+# --- PDF ---
 class PDF(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 15)
@@ -222,7 +222,6 @@ def login_screen():
             try:
                 users = load_users()
                 if not users.empty:
-                    # Supabase returns lowercase usually, simple filter
                     match = users[(users["Username"] == u) & (users["Password"] == p)]
                     if not match.empty:
                         st.session_state["logged_in"] = True
@@ -230,31 +229,23 @@ def login_screen():
                         st.session_state["username"] = match.iloc[0]["Username"]
                         st.rerun()
                     else: st.error("Invalid Credentials")
-                else: st.error("No users found in DB")
+                else: st.error("No users found")
             except Exception as e: st.error(f"Login Error: {e}")
 
 # --- MAIN APP ---
 def main_app():
     c1, c2 = st.columns([3, 1])
-    c1.title("💰 Welfare Fund (DB)")
+    c1.title("💰 Welfare Fund")
     if c2.button("Logout"):
         st.session_state["logged_in"] = False; st.rerun()
 
-    # Load Data directly from DB
     members_df = load_members_data()
+    active_members = members_df[members_df["Status"] == "Active"]["Name"].tolist() if not members_df.empty else []
     df = load_data()
-    
-    # Filter Active Members for Dropdowns
-    active_members = []
-    if not members_df.empty:
-        if "Status" in members_df.columns:
-            active_members = members_df[members_df["Status"] == "Active"]["Name"].tolist()
-        else:
-            active_members = members_df["Name"].tolist()
 
     # --- ADMIN SIDEBAR ---
     if st.session_state["user_role"] == "admin":
-        st.sidebar.title("🛠️ Admin")
+        st.sidebar.title("🛠️ Admin Controls")
         
         # 1. NEW TRANSACTION
         st.sidebar.header("📝 Add Transaction")
@@ -262,15 +253,11 @@ def main_app():
             date_val = st.date_input("Date", datetime.now(), format="DD/MM/YYYY")
             name = st.selectbox("Member", active_members if active_members else ["No Active Members"])
             
-            # Show Phone Logic
-            phone_num = ""
+            ph = ""
             if not members_df.empty and name in members_df["Name"].values:
-                # Safe access
-                try: phone_num = str(members_df.loc[members_df["Name"] == name, "Phone"].values[0])
-                except: phone_num = ""
-            
-            if phone_num and len(phone_num) > 3: st.caption(f"📞 Linked: {phone_num}")
-            else: st.caption("⚠️ No Phone")
+                try: ph = str(members_df.loc[members_df["Name"] == name, "Phone"].values[0])
+                except: pass
+            if ph: st.caption(f"📞 {ph}")
 
             txn = st.selectbox("Type", TRANSACTION_TYPES)
             amt = st.number_input("Amount", min_value=0, value=0, step=1)
@@ -278,42 +265,39 @@ def main_app():
             
             if st.form_submit_button("Save"):
                 if append_transaction(date_val, name, txn, amt, note):
-                    st.sidebar.success("Saved to DB!")
-                    # Refresh page to see data
+                    st.sidebar.success("Saved!")
                     st.rerun()
-                    
-                    # WhatsApp Link
-                    msg = f"Receipt: {amt} | {name} | {txn} | {date_val.strftime('%d/%m/%Y')}"
-                    wa_link = get_whatsapp_link(phone_num, msg)
-                    st.sidebar.link_button("💬 Send Receipt", wa_link)
+                    wa_link = get_whatsapp_link(ph, f"Receipt: {amt} | {name} | {txn}")
+                    st.sidebar.link_button("💬 WhatsApp Receipt", wa_link)
 
         st.sidebar.divider()
-
-        # 2. USER MANAGEMENT
-        with st.sidebar.expander("👤 Users (Password Protected)"):
-            current_users = load_users()
-            if not current_users.empty: st.dataframe(current_users[["Username", "Role"]], hide_index=True)
-            
-            st.write("**Add User**")
-            nu = st.text_input("User", key="nu"); np = st.text_input("Pass", type="password", key="np"); nr = st.selectbox("Role", ["admin", "viewer"], key="nr")
-            mp_a = st.text_input("Master Password", type="password", key="mp_a")
-            if st.button("Create"):
-                if mp_a == MASTER_PASSWORD:
-                    if add_user(nu, np, nr): st.success("Added!"); st.rerun()
-                else: st.error("Wrong Password")
+        
+        # 2. DELETE RECORD
+        with st.sidebar.expander("🗑️ Delete Transaction"):
+            if not df.empty:
+                # Create a list of readable strings for the dropdown
+                # Limit to last 30 transactions to keep it fast
+                recent_df = df.sort_values("Date", ascending=False).head(30)
+                # Helper dictionary to map string -> ID
+                txn_options = {f"{r['Date'].strftime('%d/%m')} | {r['Name']} | {r['Amount']} ({r['Type']})": r["ID"] for _, r in recent_df.iterrows()}
                 
-            if not current_users.empty:
-                st.divider()
-                du = st.selectbox("Delete User", current_users["Username"].tolist())
-                mp_d = st.text_input("Master Password", type="password", key="mp_d")
-                if st.button("Delete"):
-                    if mp_d == MASTER_PASSWORD:
-                        if delete_user(du): st.success("Deleted"); st.rerun()
+                sel_txn_str = st.selectbox("Select Record", list(txn_options.keys()))
+                sel_txn_id = txn_options[sel_txn_str]
+                
+                mp_del_rec = st.text_input("Master Password", type="password", key="mp_del_rec")
+                
+                if st.button("Delete Record"):
+                    if mp_del_rec == MASTER_PASSWORD:
+                        if delete_transaction_record(sel_txn_id, sel_txn_str):
+                            st.success("Deleted!")
+                            st.rerun()
+                        else: st.error("Failed")
                     else: st.error("Wrong Password")
+            else:
+                st.info("No records to delete")
 
         # 3. MEMBER MANAGEMENT
-        with st.sidebar.expander("👥 Members (Password Protected)"):
-            # ADD
+        with st.sidebar.expander("👥 Members"):
             st.write("**Add Member**")
             nm = st.text_input("Name"); nph = st.text_input("Phone")
             mp_m = st.text_input("Master Password", type="password", key="mp_m")
@@ -323,20 +307,6 @@ def main_app():
                 else: st.error("Wrong Password")
             
             st.divider()
-            
-            # UPDATE
-            st.write("**Update Phone**")
-            up_m = st.selectbox("Member", active_members, key="up_m")
-            up_p = st.text_input("New Phone")
-            mp_up = st.text_input("Master Password", type="password", key="mp_up")
-            if st.button("Update"):
-                if mp_up == MASTER_PASSWORD:
-                    if update_member_phone(up_m, up_p): st.success("Updated!"); st.rerun()
-                else: st.error("Wrong Password")
-            
-            st.divider()
-            
-            # ARCHIVE
             st.write("**Archive Member**")
             dm = st.selectbox("Archive", active_members, key="dm")
             mp_del = st.text_input("Master Password", type="password", key="mp_del")
@@ -345,15 +315,25 @@ def main_app():
                     if archive_member(dm): st.success("Archived!"); st.rerun()
                 else: st.error("Wrong Password")
 
+        # 4. USER MANAGEMENT
+        with st.sidebar.expander("👤 Users"):
+            current_users = load_users()
+            if not current_users.empty: st.dataframe(current_users[["Username", "Role"]], hide_index=True)
+            nu = st.text_input("User", key="nu"); np = st.text_input("Pass", type="password", key="np"); nr = st.selectbox("Role", ["admin", "viewer"], key="nr")
+            mp_a = st.text_input("Master Password", type="password", key="mp_a")
+            if st.button("Create User"):
+                if mp_a == MASTER_PASSWORD:
+                    if add_user(nu, np, nr): st.success("Added!"); st.rerun()
+                else: st.error("Wrong Password")
+
     # --- TABS ---
-    web_tabs = st.tabs(["🏠 Dashboard", "📈 Trends", "👤 Individual", "🗓️ Monthly"])
+    # Added "Audit Logs" as the last tab
+    web_tabs = st.tabs(["🏠 Dashboard", "📈 Trends", "👤 Individual", "🗓️ Monthly", "📜 Audit Logs"])
     
     # DASHBOARD
     with web_tabs[0]: 
-        search_query = st.text_input("🔍 Search Transactions")
+        search_query = st.text_input("🔍 Search")
         display_df = df.copy()
-        
-        # Simple string search filter
         if search_query:
             display_df = display_df[display_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)]
         
@@ -367,25 +347,20 @@ def main_app():
             c1.metric("Welfare", f"{wel:,.0f}"); c2.metric("Loans Out", f"{out:,.0f}"); c3.metric("Fees", f"{fees:,.0f}"); c4.metric("Balance", f"{bal:,.0f}")
             st.divider()
             
-            # Balance Table Calculation
-            # We iterate ALL members (active + archived) to show historical balances
-            all_members_list = members_df["Name"].tolist() if not members_df.empty else []
-            
+            # Balance Table (All Members)
             stats = []
+            all_members_list = members_df["Name"].tolist() if not members_df.empty else []
             for m in all_members_list:
                 m_df = df[df["Name"] == m]
                 w = m_df[m_df["Type"] == "Welfare Amount"]["Amount"].sum()
                 b = m_df[m_df["Type"] == "Loan Taken"]["Amount"].sum() - m_df[m_df["Type"] == "Loan Repayment"]["Amount"].sum()
                 stats.append([m, w, b])
-            
             bal_df = pd.DataFrame(stats, columns=["Name", "Total Paid", "Loan Balance"])
             
             if search_query: st.dataframe(display_df, hide_index=True, use_container_width=True)
             else: st.dataframe(bal_df, hide_index=True, use_container_width=True)
-            
             st.download_button("📄 Download PDF", create_balance_pdf(bal_df), "balances.pdf", "application/pdf")
-        else:
-            st.info("No transactions found in database.")
+        else: st.info("No transactions found.")
 
     # TRENDS
     with web_tabs[1]:
@@ -395,22 +370,17 @@ def main_app():
     # INDIVIDUAL
     with web_tabs[2]: 
         if not df.empty:
-            all_members_list = members_df["Name"].tolist() if not members_df.empty else []
-            person = st.selectbox("Member", all_members_list, key="ind_per")
+            person = st.selectbox("Member", members_df["Name"].tolist() if not members_df.empty else [], key="ind_per")
             p_df = df[df["Name"] == person].sort_values("Date", ascending=False)
-            
             if not p_df.empty:
                 bal = p_df[p_df["Type"]=="Loan Taken"]["Amount"].sum() - p_df[p_df["Type"]=="Loan Repayment"]["Amount"].sum()
                 c1, c2 = st.columns(2)
                 c1.download_button("📄 PDF", create_individual_pdf(person, p_df, bal), f"{person}.pdf", "application/pdf")
-                
-                # Phone Logic
                 ph = ""
                 if not members_df.empty and person in members_df["Name"].values:
                     try: ph = str(members_df.loc[members_df["Name"] == person, "Phone"].values[0])
-                    except: ph = ""
+                    except: pass
                 c2.link_button("💬 WhatsApp", get_whatsapp_link(ph, f"Hi {person}, Balance: {bal:,.0f}"))
-
                 p_df["Date"] = p_df["Date"].dt.strftime('%d/%m/%Y')
                 st.dataframe(p_df, use_container_width=True, hide_index=True)
 
@@ -422,6 +392,18 @@ def main_app():
             st.download_button("📄 Download", create_monthly_pdf(month, m_df), f"{month}.pdf", "application/pdf")
             m_df["Date"] = m_df["Date"].dt.strftime('%d/%m/%Y')
             st.dataframe(m_df, use_container_width=True, hide_index=True)
+
+    # AUDIT LOGS
+    with web_tabs[4]:
+        st.subheader("📜 System Audit Logs")
+        if st.session_state["user_role"] == "admin":
+            audit_df = load_audit_logs()
+            if not audit_df.empty:
+                st.dataframe(audit_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No logs found.")
+        else:
+            st.error("Admin Access Required")
 
 if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
 if not st.session_state["logged_in"]: login_screen()
