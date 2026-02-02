@@ -4,3 +4,7 @@ openpyxl
 fpdf
 gspread
 oauth2client
+pandas
+supabase
+
+
