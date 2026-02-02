@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, date
 from fpdf import FPDF
 import urllib.parse
+from io import BytesIO
 from supabase import create_client, Client
 
 # --- CONFIGURATION ---
@@ -27,10 +28,9 @@ supabase = init_supabase()
 
 # --- AUDIT ENGINE ---
 def log_audit(action, details):
-    """Records an action to the cloud audit log"""
     if not supabase: return
     try:
-        user = st.session_state.get("username", "Unknown")
+        user = st.session_state.get("username", "System")
         supabase.table("audit_logs").insert({
             "username": user,
             "action": action,
@@ -41,7 +41,6 @@ def log_audit(action, details):
 def load_audit_logs():
     if not supabase: return pd.DataFrame()
     try:
-        # Fetch last 100 logs
         response = supabase.table("audit_logs").select("*").order("created_at", desc=True).limit(100).execute()
         df = pd.DataFrame(response.data)
         if not df.empty:
@@ -51,7 +50,6 @@ def load_audit_logs():
     except: return pd.DataFrame()
 
 # --- DATA ENGINE ---
-
 def load_data():
     if not supabase: return pd.DataFrame()
     try:
@@ -64,7 +62,7 @@ def load_data():
             df["Month"] = df["Date"].dt.strftime('%Y-%m')
             df["Month_Str"] = df["Date"].dt.strftime('%B %Y')
             return df
-    except Exception as e: st.error(f"DB Error: {e}")
+    except: pass
     return pd.DataFrame(columns=["Date", "Name", "Type", "Amount", "Notes"])
 
 def append_transaction(date_obj, name, txn_type, amount, note):
@@ -84,8 +82,42 @@ def delete_transaction_record(txn_id, details_str):
         return True
     except: return False
 
-# --- MEMBER MANAGEMENT ---
+# --- ALERT SYSTEM (RE-ADDED) ---
+def generate_alerts(df, members_df):
+    alerts = []
+    if df.empty: return alerts
 
+    # 1. Low Fund Check
+    wel = df[df["Type"] == "Welfare Amount"]["Amount"].sum()
+    fees = df[df["Type"].isin(["Loan Processing Fee", "Loan Extension Fee"])]["Amount"].sum()
+    loans_out = df[df["Type"] == "Loan Taken"]["Amount"].sum() - df[df["Type"] == "Loan Repayment"]["Amount"].sum()
+    balance = wel + fees - loans_out
+    
+    if balance < 2000:
+        alerts.append(f"⚠️ **Low Fund Balance:** Only {balance:,.0f} remaining!")
+
+    # 2. Monthly Welfare Check
+    if not members_df.empty and "Status" in members_df.columns:
+        active_members = members_df[members_df["Status"] == "Active"]["Name"].tolist()
+        
+        today = date.today()
+        current_month_key = today.strftime('%Y-%m') # e.g. 2023-10
+        current_month_name = today.strftime('%B')
+        
+        for m in active_members:
+            # Check if this member has a 'Welfare Amount' transaction in the current month
+            has_paid = df[
+                (df["Name"] == m) & 
+                (df["Type"] == "Welfare Amount") & 
+                (df["Month"] == current_month_key)
+            ]
+            
+            if has_paid.empty:
+                alerts.append(f"📅 **Missing Welfare:** {m} hasn't paid for {current_month_name}")
+
+    return alerts
+
+# --- MEMBER MANAGEMENT ---
 def load_members_data():
     if not supabase: return pd.DataFrame()
     try:
@@ -148,6 +180,23 @@ def delete_user(u):
         log_audit("Delete User", f"Deleted user {u}")
         return True
     except: return False
+
+# --- BACKUP & RESTORE UTILS ---
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
+
+def restore_from_csv(table_name, uploaded_file):
+    if not supabase: return False, "No Connection"
+    try:
+        df = pd.read_csv(uploaded_file)
+        records = df.to_dict(orient='records')
+        chunk_size = 100
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i:i+chunk_size]
+            supabase.table(table_name).upsert(chunk).execute()
+        return True, f"Restored {len(records)} rows to {table_name}"
+    except Exception as e:
+        return False, str(e)
 
 # --- HELPER ---
 def get_whatsapp_link(phone, msg):
@@ -229,7 +278,7 @@ def login_screen():
                         st.session_state["username"] = match.iloc[0]["Username"]
                         st.rerun()
                     else: st.error("Invalid Credentials")
-                else: st.error("No users found")
+                else: st.error("No users found or DB Error")
             except Exception as e: st.error(f"Login Error: {e}")
 
 # --- MAIN APP ---
@@ -242,6 +291,13 @@ def main_app():
     members_df = load_members_data()
     active_members = members_df[members_df["Status"] == "Active"]["Name"].tolist() if not members_df.empty else []
     df = load_data()
+
+    # --- ALERTS / NOTIFICATIONS ---
+    if not df.empty:
+        alerts = generate_alerts(df, members_df)
+        if alerts:
+            with st.expander(f"🚨 Notifications ({len(alerts)})", expanded=True):
+                for a in alerts: st.warning(a)
 
     # --- ADMIN SIDEBAR ---
     if st.session_state["user_role"] == "admin":
@@ -275,26 +331,17 @@ def main_app():
         # 2. DELETE RECORD
         with st.sidebar.expander("🗑️ Delete Transaction"):
             if not df.empty:
-                # Create a list of readable strings for the dropdown
-                # Limit to last 30 transactions to keep it fast
                 recent_df = df.sort_values("Date", ascending=False).head(30)
-                # Helper dictionary to map string -> ID
                 txn_options = {f"{r['Date'].strftime('%d/%m')} | {r['Name']} | {r['Amount']} ({r['Type']})": r["ID"] for _, r in recent_df.iterrows()}
-                
                 sel_txn_str = st.selectbox("Select Record", list(txn_options.keys()))
                 sel_txn_id = txn_options[sel_txn_str]
-                
                 mp_del_rec = st.text_input("Master Password", type="password", key="mp_del_rec")
-                
                 if st.button("Delete Record"):
                     if mp_del_rec == MASTER_PASSWORD:
-                        if delete_transaction_record(sel_txn_id, sel_txn_str):
-                            st.success("Deleted!")
-                            st.rerun()
+                        if delete_transaction_record(sel_txn_id, sel_txn_str): st.success("Deleted!"); st.rerun()
                         else: st.error("Failed")
                     else: st.error("Wrong Password")
-            else:
-                st.info("No records to delete")
+            else: st.info("No records")
 
         # 3. MEMBER MANAGEMENT
         with st.sidebar.expander("👥 Members"):
@@ -326,16 +373,42 @@ def main_app():
                     if add_user(nu, np, nr): st.success("Added!"); st.rerun()
                 else: st.error("Wrong Password")
 
+        # 5. BACKUP & RESTORE
+        st.sidebar.divider()
+        with st.sidebar.expander("💾 Backup & Restore"):
+            st.caption("Download your data regularly!")
+            
+            if not df.empty:
+                st.download_button("📥 Backup Transactions", convert_df_to_csv(df), "transactions_backup.csv", "text/csv")
+            if not members_df.empty:
+                st.download_button("📥 Backup Members", convert_df_to_csv(members_df), "members_backup.csv", "text/csv")
+            if not current_users.empty:
+                st.download_button("📥 Backup Users", convert_df_to_csv(current_users), "users_backup.csv", "text/csv")
+            
+            st.divider()
+            st.write("**Restore Data**")
+            st.caption("⚠️ This appends data to the database.")
+            up_file = st.file_uploader("Upload CSV", type=["csv"])
+            table_target = st.selectbox("Target Table", ["transactions", "members", "app_users"])
+            mp_res = st.text_input("Master Password", type="password", key="mp_res")
+            
+            if st.button("Restore from File"):
+                if mp_res == MASTER_PASSWORD:
+                    if up_file:
+                        success, msg = restore_from_csv(table_target, up_file)
+                        if success: st.success(msg); st.rerun()
+                        else: st.error(msg)
+                    else: st.error("Upload a file first")
+                else: st.error("Wrong Password")
+
     # --- TABS ---
-    # Added "Audit Logs" as the last tab
     web_tabs = st.tabs(["🏠 Dashboard", "📈 Trends", "👤 Individual", "🗓️ Monthly", "📜 Audit Logs"])
     
     # DASHBOARD
     with web_tabs[0]: 
         search_query = st.text_input("🔍 Search")
         display_df = df.copy()
-        if search_query:
-            display_df = display_df[display_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)]
+        if search_query: display_df = display_df[display_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)]
         
         if not display_df.empty:
             wel = display_df[display_df["Type"] == "Welfare Amount"]["Amount"].sum()
@@ -347,7 +420,6 @@ def main_app():
             c1.metric("Welfare", f"{wel:,.0f}"); c2.metric("Loans Out", f"{out:,.0f}"); c3.metric("Fees", f"{fees:,.0f}"); c4.metric("Balance", f"{bal:,.0f}")
             st.divider()
             
-            # Balance Table (All Members)
             stats = []
             all_members_list = members_df["Name"].tolist() if not members_df.empty else []
             for m in all_members_list:
@@ -364,8 +436,7 @@ def main_app():
 
     # TRENDS
     with web_tabs[1]:
-        if not df.empty:
-            st.bar_chart(df.groupby(["Month", "Type"])["Amount"].sum().unstack(fill_value=0))
+        if not df.empty: st.bar_chart(df.groupby(["Month", "Type"])["Amount"].sum().unstack(fill_value=0))
 
     # INDIVIDUAL
     with web_tabs[2]: 
@@ -380,32 +451,4 @@ def main_app():
                 if not members_df.empty and person in members_df["Name"].values:
                     try: ph = str(members_df.loc[members_df["Name"] == person, "Phone"].values[0])
                     except: pass
-                c2.link_button("💬 WhatsApp", get_whatsapp_link(ph, f"Hi {person}, Balance: {bal:,.0f}"))
-                p_df["Date"] = p_df["Date"].dt.strftime('%d/%m/%Y')
-                st.dataframe(p_df, use_container_width=True, hide_index=True)
-
-    # MONTHLY
-    with web_tabs[3]: 
-        if not df.empty:
-            month = st.selectbox("Month", df["Month_Str"].unique())
-            m_df = df[df["Month_Str"] == month]
-            st.download_button("📄 Download", create_monthly_pdf(month, m_df), f"{month}.pdf", "application/pdf")
-            m_df["Date"] = m_df["Date"].dt.strftime('%d/%m/%Y')
-            st.dataframe(m_df, use_container_width=True, hide_index=True)
-
-    # AUDIT LOGS
-    with web_tabs[4]:
-        st.subheader("📜 System Audit Logs")
-        if st.session_state["user_role"] == "admin":
-            audit_df = load_audit_logs()
-            if not audit_df.empty:
-                st.dataframe(audit_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No logs found.")
-        else:
-            st.error("Admin Access Required")
-
-if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
-if not st.session_state["logged_in"]: login_screen()
-else: main_app()
-    
+                c2.link_button("💬 WhatsApp", get_whatsapp_link(ph, f"Hi {pe
